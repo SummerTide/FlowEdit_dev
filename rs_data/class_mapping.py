@@ -3,19 +3,19 @@
 import numpy as np
 from PIL import Image
 
-# Hi-UCD 9-class mapping
-# Classes: 0-Unchanged, 1-Water, 2-Ground/Barren, 3-Low Vegetation,
-#          4-Tree, 5-Building, 6-Playground, 7-Road, 8-Others
+# Hi-UCD 10-class mapping (ID 0-9)
+# Reference: https://github.com/Daisy-7/Hi-UCD-S
 HIUCD_CLASSES = {
-    0: {"name": "unchanged area", "color": (0, 0, 0)},
-    1: {"name": "water", "color": (0, 0, 255)},
-    2: {"name": "barren ground", "color": (128, 128, 128)},
-    3: {"name": "low vegetation", "color": (0, 255, 0)},
-    4: {"name": "trees", "color": (0, 128, 0)},
-    5: {"name": "buildings", "color": (255, 0, 0)},
-    6: {"name": "playground", "color": (255, 255, 0)},
-    7: {"name": "roads", "color": (255, 128, 0)},
-    8: {"name": "other structures", "color": (128, 0, 128)},
+    0: {"name": "unlabeled", "color": (255, 255, 255)},
+    1: {"name": "water", "color": (0, 153, 255)},
+    2: {"name": "grass", "color": (202, 255, 122)},
+    3: {"name": "buildings", "color": (230, 0, 0)},
+    4: {"name": "green house", "color": (230, 0, 255)},
+    5: {"name": "roads", "color": (255, 230, 0)},
+    6: {"name": "bridge", "color": (255, 181, 197)},
+    7: {"name": "others", "color": (0, 255, 230)},
+    8: {"name": "bare land", "color": (175, 122, 255)},
+    9: {"name": "woodland", "color": (26, 255, 0)},
 }
 
 
