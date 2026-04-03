@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from rs_data.class_mapping import parse_change_mask, segmap_to_rgb, segmap_to_text
+from rs_data.hiucd import parse_hiucd_mask, hiucd_segmap_to_rgb, hiucd_segmap_to_text
 
 
 def prepare_split(hiucd_root: str, split: str, output_dir: str) -> list:
@@ -70,15 +70,15 @@ def prepare_split(hiucd_root: str, split: str, output_dir: str) -> list:
 
         # Load change mask and parse into pre/post segmentation maps
         mask_rgb = np.array(Image.open(mask_path))
-        seg_pre, seg_post, _change_label = parse_change_mask(mask_rgb)
+        seg_pre, seg_post, _change_label = parse_hiucd_mask(mask_rgb)
 
         # Process both temporal phases
         for phase, img_path, seg_map in [("pre", pre_img_path, seg_pre), ("post", post_img_path, seg_post)]:
             image = Image.open(img_path).convert("RGB")
 
             # Convert class indices to RGB visualization
-            seg_rgb = segmap_to_rgb(seg_map)
-            text_prompt = segmap_to_text(seg_map)
+            seg_rgb = hiucd_segmap_to_rgb(seg_map)
+            text_prompt = hiucd_segmap_to_text(seg_map)
 
             # Save processed files
             out_name = f"{phase}_{stem}"

@@ -26,7 +26,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from FlowEdit_utils import FlowEditSD3ControlNet
-from rs_data.class_mapping import parse_change_mask, segmap_to_rgb, segmap_to_text
+from rs_data.hiucd import parse_hiucd_mask, hiucd_segmap_to_rgb, hiucd_segmap_to_text
 
 
 def load_and_preprocess_image(pipe, image_path, device):
@@ -112,10 +112,10 @@ def main():
 
         # Parse change mask into pre/post segmentation maps
         mask_rgb = np.array(Image.open(mask_path))
-        pre_seg_np, post_seg_np, _change_label = parse_change_mask(mask_rgb)
+        pre_seg_np, post_seg_np, _change_label = parse_hiucd_mask(mask_rgb)
 
-        pre_seg_rgb = segmap_to_rgb(pre_seg_np)
-        post_seg_rgb = segmap_to_rgb(post_seg_np)
+        pre_seg_rgb = hiucd_segmap_to_rgb(pre_seg_np)
+        post_seg_rgb = hiucd_segmap_to_rgb(post_seg_np)
 
         # Save RGB segmaps for loading as tensors
         pre_seg_rgb_path = os.path.join(args.output_dir, f"{stem}_seg_pre.png")
@@ -128,8 +128,8 @@ def main():
         seg_tar_cond = load_segmap_as_cond(post_seg_rgb_path, resolution, device)
 
         # Generate text prompts
-        text_pre = segmap_to_text(pre_seg_np)
-        text_post = segmap_to_text(post_seg_np)
+        text_pre = hiucd_segmap_to_text(pre_seg_np)
+        text_post = hiucd_segmap_to_text(post_seg_np)
 
         # Run FlowEdit
         x0_tar = FlowEditSD3ControlNet(
