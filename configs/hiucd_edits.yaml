@@ -1,0 +1,9 @@
+# Each entry defines a change generation task.
+# Populated by rs_inference.py from the Hi-UCD test set manifest.
+# Format:
+# - input_img: path/to/pre_image.png
+#   source_prompt: "an aerial remote sensing image with ..."
+#   target_prompts:
+#     - "an aerial remote sensing image with ..."
+#   seg_pre: path/to/seg_pre_rgb.png
+#   seg_post: path/to/seg_post_rgb.png

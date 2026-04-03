@@ -1,0 +1,13 @@
+-
+  exp_name: "FlowEdit_RS_SD3_ControlNet"
+  dataset_yaml: configs/hiucd_edits.yaml
+  model_type: "SD3_ControlNet"
+  controlnet_path: "./checkpoints/sd3_controlnet_rs/controlnet_final"
+  T_steps: 50
+  n_avg: 3
+  src_guidance_scale: 3.5
+  tar_guidance_scale: 13.5
+  n_min: 0
+  n_max: 35
+  controlnet_conditioning_scale: 1.0
+  seed: 42
