@@ -112,7 +112,7 @@ def main():
 
         # Parse change mask into pre/post segmentation maps
         mask_rgb = np.array(Image.open(mask_path))
-        pre_seg_np, post_seg_np = parse_change_mask(mask_rgb)
+        pre_seg_np, post_seg_np, _change_label = parse_change_mask(mask_rgb)
 
         pre_seg_rgb = segmap_to_rgb(pre_seg_np)
         post_seg_rgb = segmap_to_rgb(post_seg_np)

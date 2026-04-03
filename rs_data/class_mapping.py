@@ -20,22 +20,31 @@ HIUCD_CLASSES = {
 
 
 def parse_change_mask(mask_rgb: np.ndarray) -> tuple:
-    """Parse Hi-UCD change mask into pre and post semantic segmentation maps.
+    """Parse Hi-UCD change mask into pre/post segmentation maps and change label.
 
-    Hi-UCD mask encoding: (R, G, B) = (pre_class, post_class, unchanged_flag)
+    Hi-UCD mask encoding (3-channel PNG):
+    - Channel 0 (R): T1 (pre) land cover class index
+    - Channel 1 (G): T2 (post) land cover class index
+    - Channel 2 (B): binary change label (0=changed or unlabeled, 1=unchanged)
+
+    Examples:
     - (0, 0, 0) = unlabeled area
-    - (c, c, 1) = both pre and post are class c, no change
-    - (c1, c2, 0) = pre is class c1, post is class c2, changed
+    - (3, 3, 1) = building→building, unchanged
+    - (9, 3, 0) = woodland→building, changed
 
     Args:
         mask_rgb: numpy array of shape (H, W, 3), dtype uint8.
 
     Returns:
-        Tuple of (seg_pre, seg_post), each (H, W) with integer class indices.
+        Tuple of (seg_pre, seg_post, change_label):
+        - seg_pre: (H, W) int32, T1 land cover class indices
+        - seg_post: (H, W) int32, T2 land cover class indices
+        - change_label: (H, W) uint8, 0=changed/unlabeled, 1=unchanged
     """
     seg_pre = mask_rgb[:, :, 0].astype(np.int32)
     seg_post = mask_rgb[:, :, 1].astype(np.int32)
-    return seg_pre, seg_post
+    change_label = mask_rgb[:, :, 2]
+    return seg_pre, seg_post, change_label
 
 
 def segmap_to_rgb(segmap_np: np.ndarray) -> np.ndarray:

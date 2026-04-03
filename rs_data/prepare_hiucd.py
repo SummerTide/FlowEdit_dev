@@ -70,7 +70,7 @@ def prepare_split(hiucd_root: str, split: str, output_dir: str) -> list:
 
         # Load change mask and parse into pre/post segmentation maps
         mask_rgb = np.array(Image.open(mask_path))
-        seg_pre, seg_post = parse_change_mask(mask_rgb)
+        seg_pre, seg_post, _change_label = parse_change_mask(mask_rgb)
 
         # Process both temporal phases
         for phase, img_path, seg_map in [("pre", pre_img_path, seg_pre), ("post", post_img_path, seg_post)]:
