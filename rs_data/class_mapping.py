@@ -25,12 +25,12 @@ def parse_change_mask(mask_rgb: np.ndarray) -> tuple:
     Hi-UCD mask encoding (3-channel PNG):
     - Channel 0 (R): T1 (pre) land cover class index
     - Channel 1 (G): T2 (post) land cover class index
-    - Channel 2 (B): binary change label (0=changed or unlabeled, 1=unchanged)
+    - Channel 2 (B): change label (0=unlabeled, 1=no-change, 2=change)
 
     Examples:
     - (0, 0, 0) = unlabeled area
-    - (3, 3, 1) = building→building, unchanged
-    - (9, 3, 0) = woodland→building, changed
+    - (3, 3, 1) = building→building, no change
+    - (4, 8, 2) = green house→bare land, changed
 
     Args:
         mask_rgb: numpy array of shape (H, W, 3), dtype uint8.
@@ -39,7 +39,7 @@ def parse_change_mask(mask_rgb: np.ndarray) -> tuple:
         Tuple of (seg_pre, seg_post, change_label):
         - seg_pre: (H, W) int32, T1 land cover class indices
         - seg_post: (H, W) int32, T2 land cover class indices
-        - change_label: (H, W) uint8, 0=changed/unlabeled, 1=unchanged
+        - change_label: (H, W) uint8, 0=unlabeled, 1=no-change, 2=change
     """
     seg_pre = mask_rgb[:, :, 0].astype(np.int32)
     seg_post = mask_rgb[:, :, 1].astype(np.int32)
