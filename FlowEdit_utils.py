@@ -80,6 +80,52 @@ def calc_v_sd3(pipe, src_tar_latent_model_input, src_tar_prompt_embeds, src_tar_
     return noise_pred_src, noise_pred_tar
 
 
+def calc_v_sd3_controlnet(pipe, src_tar_latent_model_input, src_tar_prompt_embeds, src_tar_pooled_prompt_embeds, src_guidance_scale, tar_guidance_scale, t, controlnet, seg_src_cond, seg_tar_cond, controlnet_conditioning_scale=1.0):
+    """Velocity calculation with ControlNet conditioning for SD3.
+
+    Same as calc_v_sd3 but injects ControlNet residuals from segmentation maps.
+    src uses seg_src_cond, tar uses seg_tar_cond.
+    """
+    timestep = t.expand(src_tar_latent_model_input.shape[0])
+
+    with torch.no_grad():
+        # Build controlnet_cond: match the 4-way CFG batch order
+        # [src_uncond, src_cond, tar_uncond, tar_cond]
+        if pipe.do_classifier_free_guidance:
+            controlnet_cond = torch.cat([seg_src_cond, seg_src_cond, seg_tar_cond, seg_tar_cond])
+        else:
+            controlnet_cond = torch.cat([seg_src_cond, seg_tar_cond])
+
+        # ControlNet forward
+        controlnet_block_samples = controlnet(
+            hidden_states=src_tar_latent_model_input,
+            timestep=timestep,
+            encoder_hidden_states=src_tar_prompt_embeds,
+            pooled_projections=src_tar_pooled_prompt_embeds,
+            controlnet_cond=controlnet_cond,
+            conditioning_scale=controlnet_conditioning_scale,
+            return_dict=False,
+        )[0]
+
+        # Transformer forward with ControlNet residuals
+        noise_pred_src_tar = pipe.transformer(
+            hidden_states=src_tar_latent_model_input,
+            timestep=timestep,
+            encoder_hidden_states=src_tar_prompt_embeds,
+            pooled_projections=src_tar_pooled_prompt_embeds,
+            block_controlnet_hidden_states=controlnet_block_samples,
+            joint_attention_kwargs=None,
+            return_dict=False,
+        )[0]
+
+        if pipe.do_classifier_free_guidance:
+            src_noise_pred_uncond, src_noise_pred_text, tar_noise_pred_uncond, tar_noise_pred_text = noise_pred_src_tar.chunk(4)
+            noise_pred_src = src_noise_pred_uncond + src_guidance_scale * (src_noise_pred_text - src_noise_pred_uncond)
+            noise_pred_tar = tar_noise_pred_uncond + tar_guidance_scale * (tar_noise_pred_text - tar_noise_pred_uncond)
+
+    return noise_pred_src, noise_pred_tar
+
+
 
 def calc_v_flux(pipe, latents, prompt_embeds, pooled_prompt_embeds, guidance, text_ids, latent_image_ids, t):
     # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
