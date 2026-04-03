@@ -26,7 +26,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from FlowEdit_utils import FlowEditSD3ControlNet
-from rs_data.class_mapping import segmap_to_rgb, segmap_to_text
+from rs_data.class_mapping import parse_change_mask, segmap_to_rgb, segmap_to_text
 
 
 def load_and_preprocess_image(pipe, image_path, device):
@@ -86,54 +86,44 @@ def main():
     controlnet = SD3ControlNetModel.from_pretrained(args.controlnet_path, torch_dtype=torch.float16).to(device)
     controlnet.eval()
 
-    # Iterate over Hi-UCD test pairs
+    # Iterate over Hi-UCD pairs
+    # Structure: {split}/image/2018/, image/2019/, mask/2018_2019/
     split_dir = Path(args.hiucd_root) / args.split
-    pre_img_dir = split_dir / "image1"
-    post_img_dir = split_dir / "image2"
-    pre_label_dir = split_dir / "label1"
-    post_label_dir = split_dir / "label2"
+    pre_img_dir = split_dir / "image" / "2018"
+    post_img_dir = split_dir / "image" / "2019"
+    mask_dir = split_dir / "mask" / "2018_2019"
 
-    pre_images = sorted(pre_img_dir.glob("*.png")) + sorted(pre_img_dir.glob("*.tif"))
+    mask_files = sorted(mask_dir.glob("*.png"))
     os.makedirs(args.output_dir, exist_ok=True)
 
     results = []
 
-    for pre_img_path in tqdm(pre_images, desc="Generating"):
-        stem = pre_img_path.stem
+    for mask_path in tqdm(mask_files, desc="Generating"):
+        stem = mask_path.stem
+        pre_img_path = pre_img_dir / f"{stem}.png"
+        post_img_path = post_img_dir / f"{stem}.png"
 
-        # Find corresponding files
-        post_img_path = None
-        pre_label_path = None
-        post_label_path = None
-        for ext in [".png", ".tif", ".jpg"]:
-            if (post_img_dir / f"{stem}{ext}").exists():
-                post_img_path = post_img_dir / f"{stem}{ext}"
-            if (pre_label_dir / f"{stem}{ext}").exists():
-                pre_label_path = pre_label_dir / f"{stem}{ext}"
-            if (post_label_dir / f"{stem}{ext}").exists():
-                post_label_path = post_label_dir / f"{stem}{ext}"
-
-        if any(p is None for p in [post_img_path, pre_label_path, post_label_path]):
-            print(f"Skipping {stem}: missing files")
+        if not pre_img_path.exists() or not post_img_path.exists():
+            print(f"Skipping {stem}: missing image files")
             continue
 
         # Load pre image latent
         x0_src = load_and_preprocess_image(pipe, str(pre_img_path), device)
 
-        # Load segmaps as RGB conditions
-        pre_seg_np = np.array(Image.open(pre_label_path))
-        post_seg_np = np.array(Image.open(post_label_path))
+        # Parse change mask into pre/post segmentation maps
+        mask_rgb = np.array(Image.open(mask_path))
+        pre_seg_np, post_seg_np = parse_change_mask(mask_rgb)
 
         pre_seg_rgb = segmap_to_rgb(pre_seg_np)
         post_seg_rgb = segmap_to_rgb(post_seg_np)
 
-        # Save RGB segmaps temporarily for loading
+        # Save RGB segmaps for loading as tensors
         pre_seg_rgb_path = os.path.join(args.output_dir, f"{stem}_seg_pre.png")
         post_seg_rgb_path = os.path.join(args.output_dir, f"{stem}_seg_post.png")
         Image.fromarray(pre_seg_rgb).save(pre_seg_rgb_path)
         Image.fromarray(post_seg_rgb).save(post_seg_rgb_path)
 
-        resolution = min(x0_src.shape[2] * 8, x0_src.shape[3] * 8)  # approx original resolution
+        resolution = min(x0_src.shape[2] * 8, x0_src.shape[3] * 8)
         seg_src_cond = load_segmap_as_cond(pre_seg_rgb_path, resolution, device)
         seg_tar_cond = load_segmap_as_cond(post_seg_rgb_path, resolution, device)
 

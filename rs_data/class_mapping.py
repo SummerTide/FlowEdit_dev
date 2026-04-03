@@ -19,6 +19,25 @@ HIUCD_CLASSES = {
 }
 
 
+def parse_change_mask(mask_rgb: np.ndarray) -> tuple:
+    """Parse Hi-UCD change mask into pre and post semantic segmentation maps.
+
+    Hi-UCD mask encoding: (R, G, B) = (pre_class, post_class, unchanged_flag)
+    - (0, 0, 0) = unlabeled area
+    - (c, c, 1) = both pre and post are class c, no change
+    - (c1, c2, 0) = pre is class c1, post is class c2, changed
+
+    Args:
+        mask_rgb: numpy array of shape (H, W, 3), dtype uint8.
+
+    Returns:
+        Tuple of (seg_pre, seg_post), each (H, W) with integer class indices.
+    """
+    seg_pre = mask_rgb[:, :, 0].astype(np.int32)
+    seg_post = mask_rgb[:, :, 1].astype(np.int32)
+    return seg_pre, seg_post
+
+
 def segmap_to_rgb(segmap_np: np.ndarray) -> np.ndarray:
     """Convert class-index segmentation map (H, W) to RGB image (H, W, 3).
 

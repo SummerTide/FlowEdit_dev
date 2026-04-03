@@ -3,18 +3,22 @@
 Splits bi-temporal pairs into single-temporal (image, segmap_rgb, text) samples.
 Outputs a training manifest CSV.
 
-Expected Hi-UCD directory structure:
+Actual Hi-UCD directory structure:
     hiucd_root/
     ├── train/
-    │   ├── image1/          # pre-temporal image
-    │   ├── image2/          # post-temporal image
-    │   ├── label1/          # pre-temporal segmentation
-    │   └── label2/          # post-temporal segmentation
+    │   ├── image/
+    │   │   ├── 2018/        # pre-temporal images (512x512)
+    │   │   └── 2019/        # post-temporal images (512x512)
+    │   └── mask/
+    │       └── 2018_2019/   # change masks (R=pre_class, G=post_class, B=unchanged_flag)
+    ├── val/
+    │   ├── image/2018/, 2019/
+    │   └── mask/2018_2019/
     └── test/
-        └── ...
+        └── image/2018/, 2019/   # no masks
 
 Usage:
-    python -m rs_data.prepare_hiucd --hiucd_root /path/to/hiucd --output_dir ./data/hiucd_prepared
+    python -m rs_data.prepare_hiucd --hiucd_root /path/to/Hi-UCD --output_dir ./data/hiucd_prepared
 """
 
 import argparse
@@ -25,15 +29,27 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from rs_data.class_mapping import segmap_to_rgb, segmap_to_text
+from rs_data.class_mapping import parse_change_mask, segmap_to_rgb, segmap_to_text
 
 
 def prepare_split(hiucd_root: str, split: str, output_dir: str) -> list:
-    """Process one split (train/test) of Hi-UCD.
+    """Process one split (train/val) of Hi-UCD.
 
-    Returns list of dicts: {image_path, segmap_rgb_path, text_prompt}
+    For each image pair + change mask, produces two single-temporal samples:
+    - (pre_image, pre_segmap_rgb, pre_text)
+    - (post_image, post_segmap_rgb, post_text)
+
+    Returns list of dicts: {image_path, segmap_path, text_prompt, phase, original_name}
     """
     split_dir = Path(hiucd_root) / split
+    pre_img_dir = split_dir / "image" / "2018"
+    post_img_dir = split_dir / "image" / "2019"
+    mask_dir = split_dir / "mask" / "2018_2019"
+
+    if not mask_dir.exists():
+        print(f"Warning: {mask_dir} not found, skipping split '{split}'")
+        return []
+
     out_dir = Path(output_dir) / split
     out_img_dir = out_dir / "images"
     out_seg_dir = out_dir / "segmaps"
@@ -41,39 +57,28 @@ def prepare_split(hiucd_root: str, split: str, output_dir: str) -> list:
     out_seg_dir.mkdir(parents=True, exist_ok=True)
 
     records = []
+    mask_files = sorted(mask_dir.glob("*.png"))
 
-    # Process both temporal phases
-    for phase, img_folder, label_folder in [("pre", "image1", "label1"), ("post", "image2", "label2")]:
-        img_dir = split_dir / img_folder
-        label_dir = split_dir / label_folder
+    for mask_path in mask_files:
+        stem = mask_path.stem
+        pre_img_path = pre_img_dir / f"{stem}.png"
+        post_img_path = post_img_dir / f"{stem}.png"
 
-        if not img_dir.exists():
-            print(f"Warning: {img_dir} not found, skipping")
+        if not pre_img_path.exists() or not post_img_path.exists():
+            print(f"Warning: missing image for {stem}, skipping")
             continue
 
-        img_files = sorted(img_dir.glob("*.png")) + sorted(img_dir.glob("*.tif")) + sorted(img_dir.glob("*.jpg"))
+        # Load change mask and parse into pre/post segmentation maps
+        mask_rgb = np.array(Image.open(mask_path))
+        seg_pre, seg_post = parse_change_mask(mask_rgb)
 
-        for img_path in img_files:
-            stem = img_path.stem
-            # Find matching label file
-            label_path = None
-            for ext in [".png", ".tif", ".jpg"]:
-                candidate = label_dir / f"{stem}{ext}"
-                if candidate.exists():
-                    label_path = candidate
-                    break
-
-            if label_path is None:
-                print(f"Warning: no label found for {img_path}, skipping")
-                continue
-
-            # Load and process
+        # Process both temporal phases
+        for phase, img_path, seg_map in [("pre", pre_img_path, seg_pre), ("post", post_img_path, seg_post)]:
             image = Image.open(img_path).convert("RGB")
-            segmap = np.array(Image.open(label_path))
 
-            # Generate RGB segmap and text prompt
-            segmap_rgb = segmap_to_rgb(segmap)
-            text_prompt = segmap_to_text(segmap)
+            # Convert class indices to RGB visualization
+            seg_rgb = segmap_to_rgb(seg_map)
+            text_prompt = segmap_to_text(seg_map)
 
             # Save processed files
             out_name = f"{phase}_{stem}"
@@ -81,7 +86,7 @@ def prepare_split(hiucd_root: str, split: str, output_dir: str) -> list:
             out_seg_path = out_seg_dir / f"{out_name}.png"
 
             image.save(out_img_path)
-            Image.fromarray(segmap_rgb).save(out_seg_path)
+            Image.fromarray(seg_rgb).save(out_seg_path)
 
             records.append({
                 "image_path": str(out_img_path),
@@ -101,7 +106,7 @@ def main():
     args = parser.parse_args()
 
     all_records = []
-    for split in ["train", "test"]:
+    for split in ["train", "val"]:
         records = prepare_split(args.hiucd_root, split, args.output_dir)
         all_records.extend(records)
         print(f"{split}: {len(records)} samples prepared")
