@@ -1,13 +1,14 @@
 import torch
 from diffusers import StableDiffusion3Pipeline
 from diffusers import FluxPipeline
+from diffusers import SD3ControlNetModel
 from PIL import Image
 import argparse
-import random 
+import random
 import numpy as np
 import yaml
 import os
-from FlowEdit_utils import FlowEditSD3, FlowEditFLUX
+from FlowEdit_utils import FlowEditSD3, FlowEditFLUX, FlowEditSD3ControlNet
 
 
 
@@ -36,11 +37,19 @@ if __name__ == "__main__":
         pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.float16)
     elif model_type == 'SD3':
         pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=torch.float16)
+    elif model_type == 'SD3_ControlNet':
+        pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=torch.float16)
+        controlnet_path = exp_configs[0].get("controlnet_path", "./checkpoints/sd3_controlnet_rs/controlnet_final")
+        controlnet = SD3ControlNetModel.from_pretrained(controlnet_path, torch_dtype=torch.float16)
     else:
         raise NotImplementedError(f"Model type {model_type} not implemented")
     
     scheduler = pipe.scheduler
     pipe = pipe.to(device)
+
+    if model_type == 'SD3_ControlNet':
+        controlnet = controlnet.to(device)
+        controlnet.eval()
 
     for exp_dict in exp_configs:
 
@@ -103,6 +112,28 @@ if __name__ == "__main__":
                                                             n_min,
                                                             n_max,)
                     
+                elif model_type == 'SD3_ControlNet':
+                    from torchvision import transforms as T
+
+                    seg_pre_path = data_dict.get("seg_pre")
+                    seg_post_path = data_dict.get("seg_post")
+
+                    seg_transform = T.Compose([T.Resize(1024, interpolation=T.InterpolationMode.NEAREST), T.CenterCrop(1024), T.ToTensor()])
+                    seg_src_cond = seg_transform(Image.open(seg_pre_path).convert("RGB")).unsqueeze(0).to(device).half()
+                    seg_tar_cond = seg_transform(Image.open(seg_post_path).convert("RGB")).unsqueeze(0).to(device).half()
+
+                    controlnet_conditioning_scale = exp_dict.get("controlnet_conditioning_scale", 1.0)
+
+                    x0_tar = FlowEditSD3ControlNet(
+                        pipe, scheduler, controlnet, x0_src,
+                        src_prompt, tar_prompt, negative_prompt,
+                        seg_src_cond, seg_tar_cond,
+                        T_steps, n_avg,
+                        src_guidance_scale, tar_guidance_scale,
+                        n_min, n_max,
+                        controlnet_conditioning_scale,
+                    )
+
                 elif model_type == 'FLUX':
                     x0_tar = FlowEditFLUX(pipe,
                                                             scheduler,
