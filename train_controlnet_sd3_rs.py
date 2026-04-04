@@ -256,27 +256,26 @@ def main():
                     try:
                         val_dataset = RSControlNetDataset(args.manifest_path, resolution=args.resolution, split="val")
                         if len(val_dataset) > 0:
-                            # Move text encoders back to GPU for validation pipeline
-                            if text_encoder is not None:
-                                text_encoder.to(accelerator.device, dtype=weight_dtype)
-                            if text_encoder_2 is not None:
-                                text_encoder_2.to(accelerator.device, dtype=weight_dtype)
-                            if text_encoder_3 is not None:
-                                text_encoder_3.to(accelerator.device, dtype=weight_dtype)
+                            # Load a fresh controlnet copy for validation to avoid
+                            # disturbing the DDP-wrapped training controlnet
+                            val_controlnet = SD3ControlNetModel.from_pretrained(
+                                os.path.join(args.output_dir, f"_val_tmp"),
+                                torch_dtype=weight_dtype,
+                            ) if os.path.exists(os.path.join(args.output_dir, "_val_tmp")) else None
 
-                            val_pipe = StableDiffusion3ControlNetPipeline(
-                                transformer=transformer,
-                                controlnet=accelerator.unwrap_model(controlnet),
-                                scheduler=scheduler,
-                                vae=vae,
-                                text_encoder=text_encoder,
-                                text_encoder_2=text_encoder_2,
-                                text_encoder_3=text_encoder_3,
-                                tokenizer=tokenizer,
-                                tokenizer_2=tokenizer_2,
-                                tokenizer_3=tokenizer_3,
+                            # Save current controlnet weights to temp dir for validation
+                            val_tmp_dir = os.path.join(args.output_dir, "_val_tmp")
+                            accelerator.unwrap_model(controlnet).save_pretrained(val_tmp_dir)
+                            val_controlnet = SD3ControlNetModel.from_pretrained(val_tmp_dir, torch_dtype=weight_dtype)
+
+                            # Load text encoders to CPU, let cpu_offload handle GPU placement
+                            val_pipe = StableDiffusion3ControlNetPipeline.from_pretrained(
+                                args.pretrained_model_name_or_path,
+                                controlnet=val_controlnet,
+                                torch_dtype=weight_dtype,
                             )
-                            val_pipe.enable_model_cpu_offload()
+                            val_pipe.enable_model_cpu_offload(device=accelerator.device)
+
                             val_dir = os.path.join(args.output_dir, f"validation-{global_step}")
                             os.makedirs(val_dir, exist_ok=True)
                             for vi in range(min(args.num_validation_images, len(val_dataset))):
@@ -303,17 +302,10 @@ def main():
                                         val_images.append(wandb.Image(seg_path, caption=f"segmap_{vi}"))
                                 accelerator.log({"validation": val_images}, step=global_step)
 
-                            del val_pipe
-                    except torch.cuda.OutOfMemoryError:
-                        logger.warning(f"Validation OOM at step {global_step}, skipping")
+                            del val_pipe, val_controlnet
+                    except Exception as e:
+                        logger.warning(f"Validation failed at step {global_step}: {e}")
                     finally:
-                        # Always move text encoders back to CPU
-                        if text_encoder is not None:
-                            text_encoder.cpu()
-                        if text_encoder_2 is not None:
-                            text_encoder_2.cpu()
-                        if text_encoder_3 is not None:
-                            text_encoder_3.cpu()
                         torch.cuda.empty_cache()
 
                 if global_step >= args.max_train_steps:
