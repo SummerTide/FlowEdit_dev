@@ -37,8 +37,7 @@ class RSControlNetDataset(Dataset):
         self.seg_transform = transforms.Compose([
             transforms.Resize(resolution, interpolation=transforms.InterpolationMode.NEAREST),
             transforms.CenterCrop(resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),  # scale to [-1, 1] for VAE encoding
+            transforms.ToTensor(),  # [0, 1] range — fed directly to ControlNet, not VAE
         ])
 
         # Data augmentation (applied to both image and segmap consistently)

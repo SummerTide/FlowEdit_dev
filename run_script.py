@@ -118,12 +118,9 @@ if __name__ == "__main__":
                     seg_pre_path = data_dict.get("seg_pre")
                     seg_post_path = data_dict.get("seg_post")
 
-                    seg_transform = T.Compose([T.Resize(1024, interpolation=T.InterpolationMode.NEAREST), T.CenterCrop(1024), T.ToTensor(), T.Normalize([0.5], [0.5])])
-                    seg_src_rgb = seg_transform(Image.open(seg_pre_path).convert("RGB")).unsqueeze(0).to(device).half()
-                    seg_tar_rgb = seg_transform(Image.open(seg_post_path).convert("RGB")).unsqueeze(0).to(device).half()
-                    with torch.autocast("cuda"), torch.inference_mode():
-                        seg_src_cond = (pipe.vae.encode(seg_src_rgb).latent_dist.mode() - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
-                        seg_tar_cond = (pipe.vae.encode(seg_tar_rgb).latent_dist.mode() - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+                    seg_transform = T.Compose([T.Resize(1024, interpolation=T.InterpolationMode.NEAREST), T.CenterCrop(1024), T.ToTensor()])
+                    seg_src_cond = seg_transform(Image.open(seg_pre_path).convert("RGB")).unsqueeze(0).to(device).half()
+                    seg_tar_cond = seg_transform(Image.open(seg_post_path).convert("RGB")).unsqueeze(0).to(device).half()
 
                     controlnet_conditioning_scale = exp_dict.get("controlnet_conditioning_scale", 1.0)
 

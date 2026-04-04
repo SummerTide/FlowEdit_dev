@@ -103,6 +103,20 @@ def main():
     # Initialize ControlNet from transformer
     controlnet = SD3ControlNetModel.from_transformer(transformer)
 
+    # Replace pos_embed_input to accept 3-channel RGB instead of 16-channel VAE latent
+    # This avoids encoding semantic segmaps through VAE, which destroys their structure
+    from diffusers.models.embeddings import PatchEmbed
+    old_pe = controlnet.pos_embed_input
+    controlnet.pos_embed_input = PatchEmbed(
+        height=old_pe.proj.kernel_size[0],  # not used for SD3 (pos_embed_max_size handles it)
+        width=old_pe.proj.kernel_size[0],
+        patch_size=old_pe.proj.kernel_size[0],
+        in_channels=3,  # RGB input instead of 16-ch latent
+        embed_dim=old_pe.proj.out_channels,
+        pos_embed_type="sincos",
+        pos_embed_max_size=old_pe.pos_embed_max_size,
+    )
+
     # Freeze everything except controlnet
     transformer.requires_grad_(False)
     vae.requires_grad_(False)
@@ -182,12 +196,9 @@ def main():
                 prompt_embeds = torch.cat([prompt_embed_cache[c][0] for c in captions]).to(accelerator.device, dtype=weight_dtype)
                 pooled_prompt_embeds = torch.cat([prompt_embed_cache[c][1] for c in captions]).to(accelerator.device, dtype=weight_dtype)
 
-                # Prepare conditioning image — encode through VAE to get latent
-                # SD3 ControlNet expects 16-channel latent, not 3-channel RGB
-                cond_pixel_values = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-                with torch.no_grad():
-                    controlnet_cond = vae.encode(cond_pixel_values).latent_dist.sample()
-                    controlnet_cond = (controlnet_cond - vae.config.shift_factor) * vae.config.scaling_factor
+                # Prepare conditioning image — feed RGB segmap directly (3 channels)
+                # pos_embed_input has been replaced to accept 3-ch RGB instead of 16-ch VAE latent
+                controlnet_cond = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
 
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents)
