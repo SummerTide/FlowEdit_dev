@@ -250,63 +250,8 @@ def main():
                     accelerator.unwrap_model(controlnet).save_pretrained(save_path)
                     logger.info(f"Saved checkpoint to {save_path}")
 
-                # Validation — skip if OOM, don't crash training
-                if global_step % args.validation_steps == 0 and accelerator.is_main_process:
-                    logger.info(f"Running validation at step {global_step}...")
-                    try:
-                        val_dataset = RSControlNetDataset(args.manifest_path, resolution=args.resolution, split="val")
-                        if len(val_dataset) > 0:
-                            # Load a fresh controlnet copy for validation to avoid
-                            # disturbing the DDP-wrapped training controlnet
-                            val_controlnet = SD3ControlNetModel.from_pretrained(
-                                os.path.join(args.output_dir, f"_val_tmp"),
-                                torch_dtype=weight_dtype,
-                            ) if os.path.exists(os.path.join(args.output_dir, "_val_tmp")) else None
-
-                            # Save current controlnet weights to temp dir for validation
-                            val_tmp_dir = os.path.join(args.output_dir, "_val_tmp")
-                            accelerator.unwrap_model(controlnet).save_pretrained(val_tmp_dir)
-                            val_controlnet = SD3ControlNetModel.from_pretrained(val_tmp_dir, torch_dtype=weight_dtype)
-
-                            # Load text encoders to CPU, let cpu_offload handle GPU placement
-                            val_pipe = StableDiffusion3ControlNetPipeline.from_pretrained(
-                                args.pretrained_model_name_or_path,
-                                controlnet=val_controlnet,
-                                torch_dtype=weight_dtype,
-                            )
-                            val_pipe.enable_model_cpu_offload(device=accelerator.device)
-
-                            val_dir = os.path.join(args.output_dir, f"validation-{global_step}")
-                            os.makedirs(val_dir, exist_ok=True)
-                            for vi in range(min(args.num_validation_images, len(val_dataset))):
-                                sample = val_dataset[vi]
-                                seg_img = Image.fromarray(((sample["conditioning_pixel_values"].permute(1, 2, 0).numpy() * 0.5 + 0.5) * 255).clip(0, 255).astype("uint8"))
-                                with torch.autocast("cuda"):
-                                    out = val_pipe(
-                                        prompt=sample["caption"],
-                                        control_image=seg_img,
-                                        num_inference_steps=28,
-                                    ).images[0]
-                                out.save(os.path.join(val_dir, f"val_{vi}.png"))
-                                seg_img.save(os.path.join(val_dir, f"val_{vi}_seg.png"))
-
-                            # Log validation images to wandb
-                            if args.report_to == "wandb":
-                                import wandb
-                                val_images = []
-                                for vi in range(min(args.num_validation_images, len(val_dataset))):
-                                    img_path = os.path.join(val_dir, f"val_{vi}.png")
-                                    seg_path = os.path.join(val_dir, f"val_{vi}_seg.png")
-                                    if os.path.exists(img_path):
-                                        val_images.append(wandb.Image(img_path, caption=f"generated_{vi}"))
-                                        val_images.append(wandb.Image(seg_path, caption=f"segmap_{vi}"))
-                                accelerator.log({"validation": val_images}, step=global_step)
-
-                            del val_pipe, val_controlnet
-                    except Exception as e:
-                        logger.warning(f"Validation failed at step {global_step}: {e}")
-                    finally:
-                        torch.cuda.empty_cache()
+                # Validation disabled during training — run separately after training
+                # (40GB GPU cannot hold training state + full validation pipeline simultaneously)
 
                 if global_step >= args.max_train_steps:
                     break
