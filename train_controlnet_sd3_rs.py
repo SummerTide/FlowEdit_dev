@@ -158,8 +158,12 @@ def main():
                         )
                     )
 
-                # Prepare conditioning image
-                controlnet_cond = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                # Prepare conditioning image — encode through VAE to get latent
+                # SD3 ControlNet expects 16-channel latent, not 3-channel RGB
+                cond_pixel_values = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                with torch.no_grad():
+                    controlnet_cond = vae.encode(cond_pixel_values).latent_dist.sample()
+                    controlnet_cond = (controlnet_cond - vae.config.shift_factor) * vae.config.scaling_factor
 
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents)
@@ -186,11 +190,13 @@ def main():
                 )[0]
 
                 # Transformer forward with ControlNet conditioning
+                # Cast block samples to match frozen transformer dtype
+                controlnet_block_samples = [s.to(dtype=weight_dtype) for s in controlnet_block_samples]
                 model_pred = transformer(
-                    hidden_states=noisy_latents,
+                    hidden_states=noisy_latents.to(dtype=weight_dtype),
                     timestep=timestep,
-                    encoder_hidden_states=prompt_embeds,
-                    pooled_projections=pooled_prompt_embeds,
+                    encoder_hidden_states=prompt_embeds.to(dtype=weight_dtype),
+                    pooled_projections=pooled_prompt_embeds.to(dtype=weight_dtype),
                     block_controlnet_hidden_states=controlnet_block_samples,
                     return_dict=False,
                 )[0]

@@ -41,16 +41,23 @@ def load_and_preprocess_image(pipe, image_path, device):
     return x0.to(device)
 
 
-def load_segmap_as_cond(segmap_path, resolution, device):
-    """Load RGB segmap and prepare as ControlNet condition tensor."""
+def load_segmap_as_cond(pipe, segmap_path, resolution, device):
+    """Load RGB segmap, encode through VAE to get latent for ControlNet conditioning.
+
+    SD3 ControlNet expects 16-channel VAE latent, not 3-channel RGB.
+    """
     seg_img = Image.open(segmap_path).convert("RGB")
     transform = transforms.Compose([
         transforms.Resize(resolution, interpolation=transforms.InterpolationMode.NEAREST),
         transforms.CenterCrop(resolution),
         transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5]),  # scale to [-1, 1]
     ])
     seg_tensor = transform(seg_img).unsqueeze(0).to(device).half()
-    return seg_tensor
+    with torch.autocast("cuda"), torch.inference_mode():
+        seg_latent = pipe.vae.encode(seg_tensor).latent_dist.mode()
+    seg_latent = (seg_latent - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+    return seg_latent
 
 
 def main():
@@ -124,8 +131,8 @@ def main():
         Image.fromarray(post_seg_rgb).save(post_seg_rgb_path)
 
         resolution = min(x0_src.shape[2] * 8, x0_src.shape[3] * 8)
-        seg_src_cond = load_segmap_as_cond(pre_seg_rgb_path, resolution, device)
-        seg_tar_cond = load_segmap_as_cond(post_seg_rgb_path, resolution, device)
+        seg_src_cond = load_segmap_as_cond(pipe, pre_seg_rgb_path, resolution, device)
+        seg_tar_cond = load_segmap_as_cond(pipe, post_seg_rgb_path, resolution, device)
 
         # Generate text prompts
         text_pre = hiucd_segmap_to_text(pre_seg_np)
