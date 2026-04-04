@@ -6,6 +6,9 @@ Data/
 outputs/
 checkpoints/
 
+# Papers / large files
+*.pdf
+
 # Python
 __pycache__/
 *.pyc
