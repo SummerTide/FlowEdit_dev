@@ -64,6 +64,63 @@ def parse_args():
     return parser.parse_args()
 
 
+def save_controlnet_with_rgb_config(controlnet_model, save_path, resolution):
+    """Save ControlNet and patch config.json for 3-ch RGB pos_embed_input."""
+    controlnet_model.save_pretrained(save_path)
+    # Update config to reflect modified pos_embed_input (3-ch RGB, patch_size=16)
+    import json
+    config_path = os.path.join(save_path, "config.json")
+    with open(config_path) as f:
+        config = json.load(f)
+    config["_rgb_controlnet"] = True
+    config["_rgb_patch_size"] = controlnet_model.pos_embed_input.proj.kernel_size[0]
+    config["_rgb_in_channels"] = controlnet_model.pos_embed_input.proj.in_channels
+    config["_rgb_resolution"] = resolution
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def load_rgb_controlnet(checkpoint_path, dtype=torch.float16):
+    """Load ControlNet with 3-ch RGB pos_embed_input from checkpoint."""
+    import json
+    config_path = os.path.join(checkpoint_path, "config.json")
+    with open(config_path) as f:
+        config = json.load(f)
+
+    # Load with mismatched sizes allowed, then the correct weights will be loaded
+    controlnet = SD3ControlNetModel.from_pretrained(
+        checkpoint_path, torch_dtype=dtype,
+        ignore_mismatched_sizes=True, low_cpu_mem_usage=False,
+    )
+
+    # Rebuild pos_embed_input with correct dimensions
+    if config.get("_rgb_controlnet"):
+        from diffusers.models.embeddings import PatchEmbed
+        rgb_patch_size = config["_rgb_patch_size"]
+        rgb_in_channels = config["_rgb_in_channels"]
+        resolution = config.get("_rgb_resolution", 512)
+        controlnet.pos_embed_input = PatchEmbed(
+            height=resolution,
+            width=resolution,
+            patch_size=rgb_patch_size,
+            in_channels=rgb_in_channels,
+            embed_dim=controlnet.pos_embed_input.proj.out_channels,
+            pos_embed_type="sincos",
+            pos_embed_max_size=controlnet.pos_embed_input.pos_embed_max_size,
+        )
+        # Load just the pos_embed_input weights
+        import safetensors.torch
+        ckpt_files = [f for f in os.listdir(checkpoint_path) if f.endswith(".safetensors")]
+        for ckpt_file in ckpt_files:
+            state_dict = safetensors.torch.load_file(os.path.join(checkpoint_path, ckpt_file))
+            pe_weights = {k.replace("pos_embed_input.", ""): v for k, v in state_dict.items() if "pos_embed_input" in k}
+            if pe_weights:
+                controlnet.pos_embed_input.load_state_dict(pe_weights, strict=False)
+                break
+
+    return controlnet
+
+
 def main():
     args = parse_args()
 
@@ -264,7 +321,7 @@ def main():
                 # Checkpointing
                 if global_step % args.checkpointing_steps == 0:
                     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                    accelerator.unwrap_model(controlnet).save_pretrained(save_path)
+                    save_controlnet_with_rgb_config(accelerator.unwrap_model(controlnet), save_path, args.resolution)
                     logger.info(f"Saved checkpoint to {save_path}")
 
                 # Validation disabled during training — run separately after training
@@ -277,7 +334,7 @@ def main():
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         controlnet_unwrapped = accelerator.unwrap_model(controlnet)
-        controlnet_unwrapped.save_pretrained(os.path.join(args.output_dir, "controlnet_final"))
+        save_controlnet_with_rgb_config(controlnet_unwrapped, os.path.join(args.output_dir, "controlnet_final"), args.resolution)
         logger.info(f"Training complete. Final model saved to {args.output_dir}/controlnet_final")
 
     accelerator.end_training()

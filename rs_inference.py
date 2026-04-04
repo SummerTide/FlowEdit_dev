@@ -85,7 +85,8 @@ def main():
     ).to(device)
     scheduler = pipe.scheduler
 
-    controlnet = SD3ControlNetModel.from_pretrained(args.controlnet_path, torch_dtype=torch.float16).to(device)
+    from train_controlnet_sd3_rs import load_rgb_controlnet
+    controlnet = load_rgb_controlnet(args.controlnet_path, dtype=torch.float16).to(device)
     controlnet.eval()
 
     # Iterate over Hi-UCD pairs

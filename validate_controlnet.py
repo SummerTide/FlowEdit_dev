@@ -122,9 +122,10 @@ def main():
         torch_dtype=weight_dtype,
     ).to(device)
 
-    # Load ControlNet
+    # Load ControlNet (with RGB pos_embed_input)
     print(f"Loading ControlNet from {args.controlnet_path}...")
-    controlnet = SD3ControlNetModel.from_pretrained(args.controlnet_path, torch_dtype=weight_dtype).to(device)
+    from train_controlnet_sd3_rs import load_rgb_controlnet
+    controlnet = load_rgb_controlnet(args.controlnet_path, dtype=weight_dtype).to(device)
     controlnet.eval()
 
     # Segmap transform — resize to match latent resolution, keep as [0, 1] RGB
