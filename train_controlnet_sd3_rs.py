@@ -22,6 +22,7 @@ import os
 
 import torch
 import torch.nn.functional as F
+import accelerate
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration
@@ -67,11 +68,13 @@ def main():
     args = parse_args()
 
     project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=os.path.join(args.output_dir, "logs"))
+    ddp_kwargs = accelerate.DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         project_config=project_config,
         log_with=args.report_to if args.report_to != "none" else None,
+        kwargs_handlers=[ddp_kwargs],
     )
     logging.basicConfig(level=logging.INFO)
 
