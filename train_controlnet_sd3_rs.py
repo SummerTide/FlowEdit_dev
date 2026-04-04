@@ -105,12 +105,18 @@ def main():
 
     # Replace pos_embed_input to accept 3-channel RGB instead of 16-channel VAE latent
     # This avoids encoding semantic segmaps through VAE, which destroys their structure
+    #
+    # Dimension math for 512x512 RGB input:
+    #   hidden_states = 64x64 latent / patch_size=2 = 32x32 = 1024 tokens
+    #   RGB input needs same 1024 tokens: 512 / patch_size = 32 -> patch_size = 16
     from diffusers.models.embeddings import PatchEmbed
     old_pe = controlnet.pos_embed_input
+    vae_scale_factor = pipe.vae_scale_factor  # 8
+    rgb_patch_size = old_pe.proj.kernel_size[0] * vae_scale_factor  # 2 * 8 = 16
     controlnet.pos_embed_input = PatchEmbed(
-        height=old_pe.proj.kernel_size[0],  # not used for SD3 (pos_embed_max_size handles it)
-        width=old_pe.proj.kernel_size[0],
-        patch_size=old_pe.proj.kernel_size[0],
+        height=args.resolution,
+        width=args.resolution,
+        patch_size=rgb_patch_size,
         in_channels=3,  # RGB input instead of 16-ch latent
         embed_dim=old_pe.proj.out_channels,
         pos_embed_type="sincos",
