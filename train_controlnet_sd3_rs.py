@@ -58,6 +58,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mixed_precision", type=str, default="fp16", choices=["no", "fp16", "bf16"])
     parser.add_argument("--num_validation_images", type=int, default=4)
+    parser.add_argument("--report_to", type=str, default="wandb", choices=["wandb", "tensorboard", "none"])
+    parser.add_argument("--wandb_project", type=str, default="flowedit-rs-controlnet")
     return parser.parse_args()
 
 
@@ -69,8 +71,15 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         project_config=project_config,
+        log_with=args.report_to if args.report_to != "none" else None,
     )
     logging.basicConfig(level=logging.INFO)
+
+    if accelerator.is_main_process and args.report_to == "wandb":
+        accelerator.init_trackers(
+            project_name=args.wandb_project,
+            config=vars(args),
+        )
 
     # Load base pipeline components
     pipe = StableDiffusion3Pipeline.from_pretrained(
@@ -212,7 +221,13 @@ def main():
             if accelerator.sync_gradients:
                 global_step += 1
                 progress_bar.update(1)
-                progress_bar.set_postfix(loss=loss.detach().item(), lr=lr_scheduler.get_last_lr()[0])
+                current_loss = loss.detach().item()
+                current_lr = lr_scheduler.get_last_lr()[0]
+                progress_bar.set_postfix(loss=current_loss, lr=current_lr)
+
+                # Log metrics
+                if args.report_to != "none":
+                    accelerator.log({"train/loss": current_loss, "train/lr": current_lr}, step=global_step)
 
                 # Checkpointing
                 if global_step % args.checkpointing_steps == 0:
@@ -250,6 +265,18 @@ def main():
                                 ).images[0]
                             out.save(os.path.join(val_dir, f"val_{vi}.png"))
                             seg_img.save(os.path.join(val_dir, f"val_{vi}_seg.png"))
+                        # Log validation images to wandb
+                        if args.report_to == "wandb":
+                            import wandb
+                            val_images = []
+                            for vi in range(min(args.num_validation_images, len(val_dataset))):
+                                img_path = os.path.join(val_dir, f"val_{vi}.png")
+                                seg_path = os.path.join(val_dir, f"val_{vi}_seg.png")
+                                if os.path.exists(img_path):
+                                    val_images.append(wandb.Image(img_path, caption=f"generated_{vi}"))
+                                    val_images.append(wandb.Image(seg_path, caption=f"segmap_{vi}"))
+                            accelerator.log({"validation": val_images}, step=global_step)
+
                         del val_pipe
                         torch.cuda.empty_cache()
 
