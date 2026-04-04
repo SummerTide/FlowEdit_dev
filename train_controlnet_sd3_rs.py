@@ -68,7 +68,7 @@ def main():
     args = parse_args()
 
     project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=os.path.join(args.output_dir, "logs"))
-    ddp_kwargs = accelerate.DistributedDataParallelKwargs(find_unused_parameters=True)
+    ddp_kwargs = accelerate.DistributedDataParallelKwargs(find_unused_parameters=True, static_graph=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
@@ -77,6 +77,7 @@ def main():
         kwargs_handlers=[ddp_kwargs],
     )
     logging.basicConfig(level=logging.INFO)
+    logger.info(f"[RANK {accelerator.process_index}] DDP find_unused_parameters=True, static_graph=True")
 
     if accelerator.is_main_process and args.report_to == "wandb":
         accelerator.init_trackers(
