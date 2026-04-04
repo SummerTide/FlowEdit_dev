@@ -134,12 +134,31 @@ def main():
     weight_dtype = torch.float16 if args.mixed_precision == "fp16" else (torch.bfloat16 if args.mixed_precision == "bf16" else torch.float32)
     transformer.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
+
+    # Pre-compute text embeddings for all unique prompts to avoid per-step encoding
+    # This also avoids multi-GPU issues with pipe.encode_prompt()
+    logger.info("Pre-computing text embeddings...")
+    pipe.to(accelerator.device)
+    unique_prompts = list(set(s["text_prompt"] for s in dataset.samples))
+    prompt_embed_cache = {}
+    with torch.no_grad():
+        for prompt in tqdm(unique_prompts, desc="Encoding prompts", disable=not accelerator.is_local_main_process):
+            prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
+                prompt=prompt, prompt_2=None, prompt_3=None,
+                device=accelerator.device, do_classifier_free_guidance=False,
+            )
+            prompt_embed_cache[prompt] = (prompt_embeds.cpu(), pooled_prompt_embeds.cpu())
+
+    # Free text encoders from GPU — no longer needed
     if text_encoder is not None:
-        text_encoder.to(accelerator.device, dtype=weight_dtype)
+        text_encoder.cpu()
     if text_encoder_2 is not None:
-        text_encoder_2.to(accelerator.device, dtype=weight_dtype)
+        text_encoder_2.cpu()
     if text_encoder_3 is not None:
-        text_encoder_3.to(accelerator.device, dtype=weight_dtype)
+        text_encoder_3.cpu()
+    del pipe
+    torch.cuda.empty_cache()
+    logger.info(f"Cached {len(prompt_embed_cache)} unique prompt embeddings")
 
     # Training loop
     global_step = 0
@@ -154,18 +173,10 @@ def main():
                     latents = vae.encode(pixel_values).latent_dist.sample()
                     latents = (latents - vae.config.shift_factor) * vae.config.scaling_factor
 
-                # Encode text
+                # Look up pre-computed text embeddings
                 captions = batch["caption"]
-                with torch.no_grad():
-                    prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = (
-                        pipe.encode_prompt(
-                            prompt=captions,
-                            prompt_2=None,
-                            prompt_3=None,
-                            device=accelerator.device,
-                            do_classifier_free_guidance=False,
-                        )
-                    )
+                prompt_embeds = torch.cat([prompt_embed_cache[c][0] for c in captions]).to(accelerator.device, dtype=weight_dtype)
+                pooled_prompt_embeds = torch.cat([prompt_embed_cache[c][1] for c in captions]).to(accelerator.device, dtype=weight_dtype)
 
                 # Prepare conditioning image — encode through VAE to get latent
                 # SD3 ControlNet expects 16-channel latent, not 3-channel RGB
@@ -238,8 +249,16 @@ def main():
                 # Validation
                 if global_step % args.validation_steps == 0 and accelerator.is_main_process:
                     logger.info(f"Running validation at step {global_step}...")
-                    val_dataset = RSControlNetDataset(args.manifest_path, resolution=args.resolution, split="test")
+                    val_dataset = RSControlNetDataset(args.manifest_path, resolution=args.resolution, split="val")
                     if len(val_dataset) > 0:
+                        # Move text encoders back to GPU for validation pipeline
+                        if text_encoder is not None:
+                            text_encoder.to(accelerator.device, dtype=weight_dtype)
+                        if text_encoder_2 is not None:
+                            text_encoder_2.to(accelerator.device, dtype=weight_dtype)
+                        if text_encoder_3 is not None:
+                            text_encoder_3.to(accelerator.device, dtype=weight_dtype)
+
                         val_pipe = StableDiffusion3ControlNetPipeline(
                             transformer=transformer,
                             controlnet=accelerator.unwrap_model(controlnet),
@@ -256,7 +275,7 @@ def main():
                         os.makedirs(val_dir, exist_ok=True)
                         for vi in range(min(args.num_validation_images, len(val_dataset))):
                             sample = val_dataset[vi]
-                            seg_img = Image.fromarray((sample["conditioning_pixel_values"].permute(1, 2, 0).numpy() * 255).astype("uint8"))
+                            seg_img = Image.fromarray(((sample["conditioning_pixel_values"].permute(1, 2, 0).numpy() * 0.5 + 0.5) * 255).clip(0, 255).astype("uint8"))
                             with torch.autocast("cuda"):
                                 out = val_pipe(
                                     prompt=sample["caption"],
@@ -265,6 +284,7 @@ def main():
                                 ).images[0]
                             out.save(os.path.join(val_dir, f"val_{vi}.png"))
                             seg_img.save(os.path.join(val_dir, f"val_{vi}_seg.png"))
+
                         # Log validation images to wandb
                         if args.report_to == "wandb":
                             import wandb
@@ -278,6 +298,13 @@ def main():
                             accelerator.log({"validation": val_images}, step=global_step)
 
                         del val_pipe
+                        # Move text encoders back to CPU to free GPU memory
+                        if text_encoder is not None:
+                            text_encoder.cpu()
+                        if text_encoder_2 is not None:
+                            text_encoder_2.cpu()
+                        if text_encoder_3 is not None:
+                            text_encoder_3.cpu()
                         torch.cuda.empty_cache()
 
                 if global_step >= args.max_train_steps:
