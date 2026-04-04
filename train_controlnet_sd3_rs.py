@@ -250,59 +250,64 @@ def main():
                     accelerator.unwrap_model(controlnet).save_pretrained(save_path)
                     logger.info(f"Saved checkpoint to {save_path}")
 
-                # Validation
+                # Validation — skip if OOM, don't crash training
                 if global_step % args.validation_steps == 0 and accelerator.is_main_process:
                     logger.info(f"Running validation at step {global_step}...")
-                    val_dataset = RSControlNetDataset(args.manifest_path, resolution=args.resolution, split="val")
-                    if len(val_dataset) > 0:
-                        # Move text encoders back to GPU for validation pipeline
-                        if text_encoder is not None:
-                            text_encoder.to(accelerator.device, dtype=weight_dtype)
-                        if text_encoder_2 is not None:
-                            text_encoder_2.to(accelerator.device, dtype=weight_dtype)
-                        if text_encoder_3 is not None:
-                            text_encoder_3.to(accelerator.device, dtype=weight_dtype)
+                    try:
+                        val_dataset = RSControlNetDataset(args.manifest_path, resolution=args.resolution, split="val")
+                        if len(val_dataset) > 0:
+                            # Move text encoders back to GPU for validation pipeline
+                            if text_encoder is not None:
+                                text_encoder.to(accelerator.device, dtype=weight_dtype)
+                            if text_encoder_2 is not None:
+                                text_encoder_2.to(accelerator.device, dtype=weight_dtype)
+                            if text_encoder_3 is not None:
+                                text_encoder_3.to(accelerator.device, dtype=weight_dtype)
 
-                        val_pipe = StableDiffusion3ControlNetPipeline(
-                            transformer=transformer,
-                            controlnet=accelerator.unwrap_model(controlnet),
-                            scheduler=scheduler,
-                            vae=vae,
-                            text_encoder=text_encoder,
-                            text_encoder_2=text_encoder_2,
-                            text_encoder_3=text_encoder_3,
-                            tokenizer=tokenizer,
-                            tokenizer_2=tokenizer_2,
-                            tokenizer_3=tokenizer_3,
-                        )
-                        val_dir = os.path.join(args.output_dir, f"validation-{global_step}")
-                        os.makedirs(val_dir, exist_ok=True)
-                        for vi in range(min(args.num_validation_images, len(val_dataset))):
-                            sample = val_dataset[vi]
-                            seg_img = Image.fromarray(((sample["conditioning_pixel_values"].permute(1, 2, 0).numpy() * 0.5 + 0.5) * 255).clip(0, 255).astype("uint8"))
-                            with torch.autocast("cuda"):
-                                out = val_pipe(
-                                    prompt=sample["caption"],
-                                    control_image=seg_img,
-                                    num_inference_steps=50,
-                                ).images[0]
-                            out.save(os.path.join(val_dir, f"val_{vi}.png"))
-                            seg_img.save(os.path.join(val_dir, f"val_{vi}_seg.png"))
-
-                        # Log validation images to wandb
-                        if args.report_to == "wandb":
-                            import wandb
-                            val_images = []
+                            val_pipe = StableDiffusion3ControlNetPipeline(
+                                transformer=transformer,
+                                controlnet=accelerator.unwrap_model(controlnet),
+                                scheduler=scheduler,
+                                vae=vae,
+                                text_encoder=text_encoder,
+                                text_encoder_2=text_encoder_2,
+                                text_encoder_3=text_encoder_3,
+                                tokenizer=tokenizer,
+                                tokenizer_2=tokenizer_2,
+                                tokenizer_3=tokenizer_3,
+                            )
+                            val_pipe.enable_model_cpu_offload()
+                            val_dir = os.path.join(args.output_dir, f"validation-{global_step}")
+                            os.makedirs(val_dir, exist_ok=True)
                             for vi in range(min(args.num_validation_images, len(val_dataset))):
-                                img_path = os.path.join(val_dir, f"val_{vi}.png")
-                                seg_path = os.path.join(val_dir, f"val_{vi}_seg.png")
-                                if os.path.exists(img_path):
-                                    val_images.append(wandb.Image(img_path, caption=f"generated_{vi}"))
-                                    val_images.append(wandb.Image(seg_path, caption=f"segmap_{vi}"))
-                            accelerator.log({"validation": val_images}, step=global_step)
+                                sample = val_dataset[vi]
+                                seg_img = Image.fromarray(((sample["conditioning_pixel_values"].permute(1, 2, 0).numpy() * 0.5 + 0.5) * 255).clip(0, 255).astype("uint8"))
+                                with torch.autocast("cuda"):
+                                    out = val_pipe(
+                                        prompt=sample["caption"],
+                                        control_image=seg_img,
+                                        num_inference_steps=28,
+                                    ).images[0]
+                                out.save(os.path.join(val_dir, f"val_{vi}.png"))
+                                seg_img.save(os.path.join(val_dir, f"val_{vi}_seg.png"))
 
-                        del val_pipe
-                        # Move text encoders back to CPU to free GPU memory
+                            # Log validation images to wandb
+                            if args.report_to == "wandb":
+                                import wandb
+                                val_images = []
+                                for vi in range(min(args.num_validation_images, len(val_dataset))):
+                                    img_path = os.path.join(val_dir, f"val_{vi}.png")
+                                    seg_path = os.path.join(val_dir, f"val_{vi}_seg.png")
+                                    if os.path.exists(img_path):
+                                        val_images.append(wandb.Image(img_path, caption=f"generated_{vi}"))
+                                        val_images.append(wandb.Image(seg_path, caption=f"segmap_{vi}"))
+                                accelerator.log({"validation": val_images}, step=global_step)
+
+                            del val_pipe
+                    except torch.cuda.OutOfMemoryError:
+                        logger.warning(f"Validation OOM at step {global_step}, skipping")
+                    finally:
+                        # Always move text encoders back to CPU
                         if text_encoder is not None:
                             text_encoder.cpu()
                         if text_encoder_2 is not None:
