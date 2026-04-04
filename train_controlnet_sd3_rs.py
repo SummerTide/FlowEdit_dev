@@ -117,7 +117,7 @@ def main():
 
     # Dataset and DataLoader
     dataset = RSControlNetDataset(args.manifest_path, resolution=args.resolution, split="train")
-    dataloader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True, num_workers=0, drop_last=True)
+    dataloader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True, num_workers=2, drop_last=True)
 
     # Optimizer
     optimizer = torch.optim.AdamW(controlnet.parameters(), lr=args.learning_rate, weight_decay=1e-2)
