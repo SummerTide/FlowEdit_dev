@@ -80,44 +80,52 @@ def save_controlnet_with_rgb_config(controlnet_model, save_path, resolution):
         json.dump(config, f, indent=2)
 
 
-def load_rgb_controlnet(checkpoint_path, dtype=torch.float16):
-    """Load ControlNet with 3-ch RGB pos_embed_input from checkpoint."""
+def load_rgb_controlnet(checkpoint_path, dtype=torch.float16, resolution=512):
+    """Load ControlNet with 3-ch RGB pos_embed_input from checkpoint.
+
+    Strategy: detect actual weight shapes from the safetensors file,
+    build model with matching pos_embed_input, then load all weights.
+    """
     import json
+    import safetensors.torch
+    from diffusers.models.embeddings import PatchEmbed
+
+    # Load config
     config_path = os.path.join(checkpoint_path, "config.json")
     with open(config_path) as f:
         config = json.load(f)
 
-    # Load with mismatched sizes allowed, then the correct weights will be loaded
-    controlnet = SD3ControlNetModel.from_pretrained(
-        checkpoint_path, torch_dtype=dtype,
-        ignore_mismatched_sizes=True, low_cpu_mem_usage=False,
-    )
+    # Load state dict to inspect actual weight shapes
+    ckpt_files = [f for f in os.listdir(checkpoint_path) if f.endswith(".safetensors")]
+    state_dict = safetensors.torch.load_file(os.path.join(checkpoint_path, ckpt_files[0]))
 
-    # Rebuild pos_embed_input with correct dimensions
-    if config.get("_rgb_controlnet"):
-        from diffusers.models.embeddings import PatchEmbed
-        rgb_patch_size = config["_rgb_patch_size"]
-        rgb_in_channels = config["_rgb_in_channels"]
-        resolution = config.get("_rgb_resolution", 512)
+    # Detect pos_embed_input shape from weights
+    pe_weight = state_dict["pos_embed_input.proj.weight"]
+    actual_out_ch, actual_in_ch, actual_k, _ = pe_weight.shape  # e.g. [1536, 3, 16, 16]
+
+    # Build model with default config (16-ch, patch=2)
+    controlnet = SD3ControlNetModel(**{k: v for k, v in config.items() if not k.startswith("_")})
+
+    # Replace pos_embed_input to match saved weights
+    if actual_in_ch != controlnet.pos_embed_input.proj.in_channels or actual_k != controlnet.pos_embed_input.proj.kernel_size[0]:
         controlnet.pos_embed_input = PatchEmbed(
             height=resolution,
             width=resolution,
-            patch_size=rgb_patch_size,
-            in_channels=rgb_in_channels,
-            embed_dim=controlnet.pos_embed_input.proj.out_channels,
+            patch_size=actual_k,
+            in_channels=actual_in_ch,
+            embed_dim=actual_out_ch,
             pos_embed_type="sincos",
-            pos_embed_max_size=controlnet.pos_embed_input.pos_embed_max_size,
+            pos_embed_max_size=config.get("pos_embed_max_size"),
         )
-        # Load just the pos_embed_input weights
-        import safetensors.torch
-        ckpt_files = [f for f in os.listdir(checkpoint_path) if f.endswith(".safetensors")]
-        for ckpt_file in ckpt_files:
-            state_dict = safetensors.torch.load_file(os.path.join(checkpoint_path, ckpt_file))
-            pe_weights = {k.replace("pos_embed_input.", ""): v for k, v in state_dict.items() if "pos_embed_input" in k}
-            if pe_weights:
-                controlnet.pos_embed_input.load_state_dict(pe_weights, strict=False)
-                break
 
+    # Load all weights — now shapes match (strict=False for pos_embed which may not be saved)
+    missing, unexpected = controlnet.load_state_dict(state_dict, strict=False)
+    if missing:
+        # Only pos_embed_input.pos_embed is expected to be missing (sincos, not learned)
+        for k in missing:
+            if "pos_embed" not in k:
+                raise RuntimeError(f"Unexpected missing key: {k}")
+    controlnet = controlnet.to(dtype=dtype)
     return controlnet
 
 
@@ -159,6 +167,17 @@ def main():
 
     # Initialize ControlNet from transformer
     controlnet = SD3ControlNetModel.from_transformer(transformer)
+
+    # Initialize controlnet_blocks (zero-conv) with small nonzero values
+    # instead of zeros. With zero init, gradients cannot flow back to
+    # ControlNet's internal transformer blocks (grad * 0 = 0).
+    # Small init allows gradients to flow from the start.
+    import torch.nn as nn
+    for block in controlnet.controlnet_blocks:
+        if isinstance(block, nn.Linear):
+            nn.init.normal_(block.weight, std=1e-5)
+            if block.bias is not None:
+                nn.init.zeros_(block.bias)
 
     # Replace pos_embed_input to accept 3-channel RGB instead of 16-channel VAE latent
     # This avoids encoding semantic segmaps through VAE, which destroys their structure
@@ -277,29 +296,29 @@ def main():
                 # Target velocity
                 target = noise - latents
 
-                # ControlNet forward
-                controlnet_block_samples = controlnet(
-                    hidden_states=noisy_latents,
-                    timestep=timestep,
-                    encoder_hidden_states=prompt_embeds,
-                    pooled_projections=pooled_prompt_embeds,
-                    controlnet_cond=controlnet_cond,
-                    return_dict=False,
-                )[0]
+                # ControlNet + Transformer forward under autocast
+                # IMPORTANT: do NOT manually cast tensors — autocast preserves the
+                # computation graph so gradients flow back to all ControlNet params
+                with torch.cuda.amp.autocast(dtype=weight_dtype):
+                    controlnet_block_samples = controlnet(
+                        hidden_states=noisy_latents,
+                        timestep=timestep,
+                        encoder_hidden_states=prompt_embeds,
+                        pooled_projections=pooled_prompt_embeds,
+                        controlnet_cond=controlnet_cond,
+                        return_dict=False,
+                    )[0]
 
-                # Transformer forward with ControlNet conditioning
-                # Cast block samples to match frozen transformer dtype
-                controlnet_block_samples = [s.to(dtype=weight_dtype) for s in controlnet_block_samples]
-                model_pred = transformer(
-                    hidden_states=noisy_latents.to(dtype=weight_dtype),
-                    timestep=timestep,
-                    encoder_hidden_states=prompt_embeds.to(dtype=weight_dtype),
-                    pooled_projections=pooled_prompt_embeds.to(dtype=weight_dtype),
-                    block_controlnet_hidden_states=controlnet_block_samples,
-                    return_dict=False,
-                )[0]
+                    model_pred = transformer(
+                        hidden_states=noisy_latents,
+                        timestep=timestep,
+                        encoder_hidden_states=prompt_embeds,
+                        pooled_projections=pooled_prompt_embeds,
+                        block_controlnet_hidden_states=controlnet_block_samples,
+                        return_dict=False,
+                    )[0]
 
-                # Flow matching loss
+                # Flow matching loss (in fp32 for stability)
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 accelerator.backward(loss)
