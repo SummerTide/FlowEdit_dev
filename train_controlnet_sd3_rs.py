@@ -199,8 +199,7 @@ def main():
         pos_embed_max_size=old_pe.pos_embed_max_size,
     )
 
-    # Freeze everything except controlnet
-    transformer.requires_grad_(False)
+    # Freeze base models
     vae.requires_grad_(False)
     if text_encoder is not None:
         text_encoder.requires_grad_(False)
@@ -209,14 +208,28 @@ def main():
     if text_encoder_3 is not None:
         text_encoder_3.requires_grad_(False)
 
+    # Add LoRA to transformer for RS domain adaptation
+    # This lets the transformer learn RS-specific features while keeping most weights frozen
+    from peft import LoraConfig, get_peft_model
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=16,
+        target_modules=["to_q", "to_k", "to_v", "to_out.0"],
+        lora_dropout=0.0,
+    )
+    transformer = get_peft_model(transformer, lora_config)
+    transformer.print_trainable_parameters()
+    transformer.train()
+
     controlnet.train()
 
     # Dataset and DataLoader
     dataset = RSControlNetDataset(args.manifest_path, resolution=args.resolution, split="train")
     dataloader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True, num_workers=2, drop_last=True)
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(controlnet.parameters(), lr=args.learning_rate, weight_decay=1e-2)
+    # Optimizer — train both ControlNet and transformer LoRA params
+    trainable_params = list(controlnet.parameters()) + list(filter(lambda p: p.requires_grad, transformer.parameters()))
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.learning_rate, weight_decay=1e-2)
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -225,14 +238,13 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    # Prepare with accelerator
-    controlnet, optimizer, dataloader, lr_scheduler = accelerator.prepare(
-        controlnet, optimizer, dataloader, lr_scheduler
+    # Prepare with accelerator — include transformer (has LoRA trainable params)
+    controlnet, transformer, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+        controlnet, transformer, optimizer, dataloader, lr_scheduler
     )
 
     # Move frozen models to device
     weight_dtype = torch.float16 if args.mixed_precision == "fp16" else (torch.bfloat16 if args.mixed_precision == "bf16" else torch.float32)
-    transformer.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
 
     # Pre-compute text embeddings for all unique prompts to avoid per-step encoding
