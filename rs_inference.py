@@ -26,7 +26,13 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from FlowEdit_utils import FlowEditSD3ControlNet
-from rs_data.hiucd import parse_hiucd_mask, hiucd_segmap_to_rgb, hiucd_segmap_to_text
+from rs_data.hiucd import (
+    HIUCD_CLASSES,
+    HIUCD_UNLABELED_IDX,
+    hiucd_segmap_to_rgb,
+    hiucd_segmap_to_text,
+    parse_hiucd_mask,
+)
 
 
 def inference_autocast(device, dtype):
@@ -69,6 +75,48 @@ def load_segmap_as_controlnet_cond(pipe, segmap_rgb, resolution, device, dtype):
     return encode_with_vae(pipe, seg_tensor).to(device=device, dtype=dtype)
 
 
+def format_class_prompt(class_names):
+    if not class_names:
+        return "an aerial remote sensing image"
+    if len(class_names) == 1:
+        return f"an aerial remote sensing image with {class_names[0]}"
+    classes_str = ", ".join(class_names[:-1]) + " and " + class_names[-1]
+    return f"an aerial remote sensing image with {classes_str}"
+
+
+def build_shared_segmap_prompt(pre_seg_np, post_seg_np, top_k=4):
+    """Build one shared prompt so edits are driven by segmap changes, not text deltas."""
+    merged_counts = {}
+    for class_idx, info in HIUCD_CLASSES.items():
+        if class_idx == HIUCD_UNLABELED_IDX:
+            continue
+        count = int(np.sum(pre_seg_np == class_idx) + np.sum(post_seg_np == class_idx))
+        if count > 0:
+            merged_counts[class_idx] = count
+
+    if not merged_counts:
+        return "an aerial remote sensing image"
+
+    sorted_classes = sorted(merged_counts, key=merged_counts.get, reverse=True)[:top_k]
+    class_names = [HIUCD_CLASSES[class_idx]["name"] for class_idx in sorted_classes]
+    return format_class_prompt(class_names)
+
+
+def resolve_flowedit_prompts(pre_seg_np, post_seg_np, prompt_mode, shared_prompt_top_k, neutral_prompt):
+    text_pre = hiucd_segmap_to_text(pre_seg_np)
+    text_post = hiucd_segmap_to_text(post_seg_np)
+
+    if prompt_mode == "paired":
+        return text_pre, text_post, text_pre, text_post
+    if prompt_mode == "shared_union":
+        shared_prompt = build_shared_segmap_prompt(pre_seg_np, post_seg_np, top_k=shared_prompt_top_k)
+        return text_pre, text_post, shared_prompt, shared_prompt
+    if prompt_mode == "neutral":
+        return text_pre, text_post, neutral_prompt, neutral_prompt
+
+    raise ValueError(f"Unsupported prompt mode: {prompt_mode}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pretrained_model_name_or_path", type=str, default="stabilityai/stable-diffusion-3-medium-diffusers")
@@ -85,6 +133,15 @@ def main():
     parser.add_argument("--controlnet_conditioning_scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split", type=str, default="test")
+    parser.add_argument(
+        "--prompt_mode",
+        type=str,
+        default="shared_union",
+        choices=["paired", "shared_union", "neutral"],
+        help="How text prompts are used. Shared modes keep source/target text identical so edits are mainly driven by segmap differences.",
+    )
+    parser.add_argument("--shared_prompt_top_k", type=int, default=4)
+    parser.add_argument("--neutral_prompt", type=str, default="an aerial remote sensing image")
     args = parser.parse_args()
 
     device = torch.device(f"cuda:{args.device_number}" if torch.cuda.is_available() else "cpu")
@@ -143,19 +200,29 @@ def main():
         seg_src_cond = load_segmap_as_controlnet_cond(pipe, pre_seg_rgb, resolution, device, weight_dtype)
         seg_tar_cond = load_segmap_as_controlnet_cond(pipe, post_seg_rgb, resolution, device, weight_dtype)
 
-        # Generate text prompts
-        text_pre = hiucd_segmap_to_text(pre_seg_np)
-        text_post = hiucd_segmap_to_text(post_seg_np)
+        # Resolve text conditioning. Shared modes intentionally remove text deltas
+        # so the edit is primarily driven by segmap / ControlNet differences.
+        text_pre, text_post, flowedit_src_prompt, flowedit_tar_prompt = resolve_flowedit_prompts(
+            pre_seg_np,
+            post_seg_np,
+            args.prompt_mode,
+            args.shared_prompt_top_k,
+            args.neutral_prompt,
+        )
+
+        effective_tar_guidance_scale = args.tar_guidance_scale
+        if args.prompt_mode != "paired":
+            effective_tar_guidance_scale = args.src_guidance_scale
 
         # Run FlowEdit
         x0_tar = FlowEditSD3ControlNet(
             pipe, scheduler, controlnet, x0_src,
-            text_pre, text_post, "",
+            flowedit_src_prompt, flowedit_tar_prompt, "",
             seg_src_cond, seg_tar_cond,
             T_steps=args.T_steps,
             n_avg=args.n_avg,
             src_guidance_scale=args.src_guidance_scale,
-            tar_guidance_scale=args.tar_guidance_scale,
+            tar_guidance_scale=effective_tar_guidance_scale,
             n_min=args.n_min,
             n_max=args.n_max,
             controlnet_conditioning_scale=args.controlnet_conditioning_scale,
@@ -176,8 +243,11 @@ def main():
             "pre_img": str(pre_img_path),
             "post_img_real": str(post_img_path),
             "post_img_generated": out_path,
-            "text_pre": text_pre,
-            "text_post": text_post,
+            "seg_text_pre": text_pre,
+            "seg_text_post": text_post,
+            "flowedit_src_prompt": flowedit_src_prompt,
+            "flowedit_tar_prompt": flowedit_tar_prompt,
+            "prompt_mode": args.prompt_mode,
         })
 
     # Save results manifest
