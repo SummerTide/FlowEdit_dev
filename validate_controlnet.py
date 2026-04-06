@@ -112,7 +112,7 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(f"cuda:{args.device_number}" if torch.cuda.is_available() else "cpu")
-    weight_dtype = torch.float16
+    weight_dtype = torch.bfloat16
     torch.manual_seed(args.seed)
 
     # Load base pipeline
