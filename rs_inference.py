@@ -15,11 +15,11 @@ Usage:
 import argparse
 import csv
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
 import torch
-import yaml
 from diffusers import SD3ControlNetModel, StableDiffusion3Pipeline
 from PIL import Image
 from torchvision import transforms
@@ -29,34 +29,49 @@ from FlowEdit_utils import FlowEditSD3ControlNet
 from rs_data.hiucd import parse_hiucd_mask, hiucd_segmap_to_rgb, hiucd_segmap_to_text
 
 
-def load_and_preprocess_image(pipe, image_path, device):
-    """Load image, encode to VAE latent."""
+def inference_autocast(device, dtype):
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=dtype)
+    return nullcontext()
+
+
+def encode_with_vae(pipe, image_tensor):
+    """Encode a normalized image tensor into the SD3 VAE latent space."""
+    device = image_tensor.device
+    dtype = image_tensor.dtype
+    with inference_autocast(device, dtype), torch.inference_mode():
+        latent = pipe.vae.encode(image_tensor).latent_dist.mode()
+    return (latent - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
+
+
+def load_and_preprocess_image(pipe, image_path, device, dtype):
+    """Load an RGB image and encode it to VAE latent."""
     image = Image.open(image_path).convert("RGB")
     image = image.crop((0, 0, image.width - image.width % 16, image.height - image.height % 16))
-    image_tensor = pipe.image_processor.preprocess(image)
-    image_tensor = image_tensor.to(device).half()
-    with torch.autocast("cuda"), torch.inference_mode():
-        x0_denorm = pipe.vae.encode(image_tensor).latent_dist.mode()
-    x0 = (x0_denorm - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
-    return x0.to(device)
+    image_tensor = pipe.image_processor.preprocess(image).to(device=device, dtype=dtype)
+    return encode_with_vae(pipe, image_tensor).to(device=device, dtype=dtype)
 
 
-def load_segmap_as_cond(segmap_path, resolution, device):
-    """Load RGB segmap as ControlNet condition tensor.
+def load_segmap_as_controlnet_cond(pipe, segmap_rgb, resolution, device, dtype):
+    """Load an RGB segmap and encode it into the ControlNet conditioning latent.
 
-    ControlNet pos_embed_input accepts 3-channel RGB directly (no VAE encoding).
+    `train_controlnet_sd3_rs.py` trains SD3 ControlNet on VAE latents derived
+    from normalized RGB segmaps, so inference must mirror that preprocessing.
     """
-    seg_img = Image.open(segmap_path).convert("RGB")
+    seg_img = Image.fromarray(segmap_rgb).convert("RGB")
     transform = transforms.Compose([
         transforms.Resize(resolution, interpolation=transforms.InterpolationMode.NEAREST),
         transforms.CenterCrop(resolution),
-        transforms.ToTensor(),  # [0, 1] range
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ])
-    return transform(seg_img).unsqueeze(0).to(device).half()
+    seg_tensor = transform(seg_img).unsqueeze(0).to(device=device, dtype=dtype)
+    return encode_with_vae(pipe, seg_tensor).to(device=device, dtype=dtype)
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--pretrained_model_name_or_path", type=str, default="stabilityai/stable-diffusion-3-medium-diffusers")
     parser.add_argument("--hiucd_root", type=str, required=True)
     parser.add_argument("--controlnet_path", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default="./outputs/rs_flowedit")
@@ -79,14 +94,17 @@ def main():
     np.random.seed(args.seed)
 
     # Load models
+    weight_dtype = torch.float16 if device.type == "cuda" else torch.float32
     pipe = StableDiffusion3Pipeline.from_pretrained(
-        "stabilityai/stable-diffusion-3-medium-diffusers",
-        torch_dtype=torch.float16,
+        args.pretrained_model_name_or_path,
+        torch_dtype=weight_dtype,
     ).to(device)
     scheduler = pipe.scheduler
 
-    from train_controlnet_sd3_rs import load_rgb_controlnet
-    controlnet = load_rgb_controlnet(args.controlnet_path, dtype=torch.float16).to(device)
+    controlnet = SD3ControlNetModel.from_pretrained(
+        args.controlnet_path,
+        torch_dtype=weight_dtype,
+    ).to(device)
     controlnet.eval()
 
     # Iterate over Hi-UCD pairs
@@ -111,7 +129,7 @@ def main():
             continue
 
         # Load pre image latent
-        x0_src = load_and_preprocess_image(pipe, str(pre_img_path), device)
+        x0_src = load_and_preprocess_image(pipe, str(pre_img_path), device, weight_dtype)
 
         # Parse change mask into pre/post segmentation maps
         mask_rgb = np.array(Image.open(mask_path))
@@ -120,15 +138,10 @@ def main():
         pre_seg_rgb = hiucd_segmap_to_rgb(pre_seg_np)
         post_seg_rgb = hiucd_segmap_to_rgb(post_seg_np)
 
-        # Save RGB segmaps for loading as tensors
-        pre_seg_rgb_path = os.path.join(args.output_dir, f"{stem}_seg_pre.png")
-        post_seg_rgb_path = os.path.join(args.output_dir, f"{stem}_seg_post.png")
-        Image.fromarray(pre_seg_rgb).save(pre_seg_rgb_path)
-        Image.fromarray(post_seg_rgb).save(post_seg_rgb_path)
-
-        resolution = min(x0_src.shape[2] * 8, x0_src.shape[3] * 8)
-        seg_src_cond = load_segmap_as_cond(pre_seg_rgb_path, resolution, device)
-        seg_tar_cond = load_segmap_as_cond(post_seg_rgb_path, resolution, device)
+        vae_scale_factor = getattr(pipe, "vae_scale_factor", 8)
+        resolution = min(x0_src.shape[2] * vae_scale_factor, x0_src.shape[3] * vae_scale_factor)
+        seg_src_cond = load_segmap_as_controlnet_cond(pipe, pre_seg_rgb, resolution, device, weight_dtype)
+        seg_tar_cond = load_segmap_as_controlnet_cond(pipe, post_seg_rgb, resolution, device, weight_dtype)
 
         # Generate text prompts
         text_pre = hiucd_segmap_to_text(pre_seg_np)
@@ -150,7 +163,7 @@ def main():
 
         # Decode
         x0_tar_denorm = (x0_tar / pipe.vae.config.scaling_factor) + pipe.vae.config.shift_factor
-        with torch.autocast("cuda"), torch.inference_mode():
+        with inference_autocast(device, weight_dtype), torch.inference_mode():
             image_tar = pipe.vae.decode(x0_tar_denorm, return_dict=False)[0]
         image_tar = pipe.image_processor.postprocess(image_tar)
 
@@ -169,10 +182,11 @@ def main():
 
     # Save results manifest
     manifest_path = os.path.join(args.output_dir, "results.csv")
-    with open(manifest_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=results[0].keys())
-        writer.writeheader()
-        writer.writerows(results)
+    if results:
+        with open(manifest_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=results[0].keys())
+            writer.writeheader()
+            writer.writerows(results)
 
     print(f"Done. {len(results)} images generated. Results: {manifest_path}")
 
