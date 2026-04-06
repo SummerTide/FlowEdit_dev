@@ -175,7 +175,7 @@ def FlowEditSD3(pipe,
     num_warmup_steps = max(len(timesteps) - T_steps * scheduler.order, 0)
     pipe._num_timesteps = len(timesteps)
     pipe._guidance_scale = src_guidance_scale
-    
+
     # src prompts
     (
         src_prompt_embeds,
@@ -206,11 +206,11 @@ def FlowEditSD3(pipe,
         do_classifier_free_guidance=pipe.do_classifier_free_guidance,
         device=device,
     )
- 
+
     # CFG prep
     src_tar_prompt_embeds = torch.cat([src_negative_prompt_embeds, src_prompt_embeds, tar_negative_prompt_embeds, tar_prompt_embeds], dim=0)
     src_tar_pooled_prompt_embeds = torch.cat([src_negative_pooled_prompt_embeds, src_pooled_prompt_embeds, tar_negative_pooled_prompt_embeds, tar_pooled_prompt_embeds], dim=0)
-    
+
     # initialize our ODE Zt_edit_1=x_src
     zt_edit = x_src.clone()
 
@@ -289,7 +289,8 @@ def FlowEditSD3ControlNet(pipe,
     tar_guidance_scale: float = 13.5,
     n_min: int = 0,
     n_max: int = 33,
-    controlnet_conditioning_scale: float = 1.0,):
+    controlnet_conditioning_scale: float = 1.0,
+    v_delta_scale: float = 1.0,):
     """FlowEdit ODE with ControlNet conditioning on semantic segmentation maps.
 
     Same as FlowEditSD3 but passes seg_src_cond / seg_tar_cond through ControlNet
@@ -384,7 +385,7 @@ def FlowEditSD3ControlNet(pipe,
 
             # propagate direct ODE
             zt_edit = zt_edit.to(torch.float32)
-            zt_edit = zt_edit + (t_im1 - t_i) * V_delta_avg
+            zt_edit = zt_edit + (t_im1 - t_i) * v_delta_scale * V_delta_avg
             zt_edit = zt_edit.to(V_delta_avg.dtype)
 
         else:  # regular sampling for last n_min steps

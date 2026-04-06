@@ -131,6 +131,7 @@ def main():
     parser.add_argument("--n_min", type=int, default=0)
     parser.add_argument("--n_max", type=int, default=35)
     parser.add_argument("--controlnet_conditioning_scale", type=float, default=1.0)
+    parser.add_argument("--v_delta_scale", type=float, default=1.0, help="Scale factor for the FlowEdit velocity delta (V_tar - V_src). Values > 1 amplify segmap-driven changes.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument(
@@ -142,6 +143,7 @@ def main():
     )
     parser.add_argument("--shared_prompt_top_k", type=int, default=4)
     parser.add_argument("--neutral_prompt", type=str, default="an aerial remote sensing image")
+    parser.add_argument("--equalize_guidance", action="store_true", help="Force tar_guidance_scale = src_guidance_scale in shared/neutral modes. Off by default so ControlNet differences are amplified by higher tar guidance.")
     args = parser.parse_args()
 
     device = torch.device(f"cuda:{args.device_number}" if torch.cuda.is_available() else "cpu")
@@ -211,7 +213,7 @@ def main():
         )
 
         effective_tar_guidance_scale = args.tar_guidance_scale
-        if args.prompt_mode != "paired":
+        if args.prompt_mode != "paired" and args.equalize_guidance:
             effective_tar_guidance_scale = args.src_guidance_scale
 
         # Run FlowEdit
@@ -226,6 +228,7 @@ def main():
             n_min=args.n_min,
             n_max=args.n_max,
             controlnet_conditioning_scale=args.controlnet_conditioning_scale,
+            v_delta_scale=args.v_delta_scale,
         )
 
         # Decode
