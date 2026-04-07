@@ -290,7 +290,8 @@ def FlowEditSD3ControlNet(pipe,
     n_min: int = 0,
     n_max: int = 33,
     controlnet_conditioning_scale: float = 1.0,
-    v_delta_scale: float = 1.0,):
+    v_delta_scale: float = 1.0,
+    step_callback=None,):
     """FlowEdit ODE with ControlNet conditioning on semantic segmentation maps.
 
     Same as FlowEditSD3 but passes seg_src_cond / seg_tar_cond through ControlNet
@@ -301,6 +302,8 @@ def FlowEditSD3ControlNet(pipe,
         seg_src_cond: pre-temporal segmap RGB, tensor (1, 3, H, W), values in [0, 1]
         seg_tar_cond: post-temporal segmap RGB, tensor (1, 3, H, W), values in [0, 1]
         controlnet_conditioning_scale: strength of ControlNet conditioning (default 1.0)
+        step_callback: optional callable(step_idx, timestep, latent, phase) called
+            after each active step. phase is 'flowedit' or 'sdedit'.
     """
     device = x_src.device
 
@@ -388,6 +391,9 @@ def FlowEditSD3ControlNet(pipe,
             zt_edit = zt_edit + (t_im1 - t_i) * v_delta_scale * V_delta_avg
             zt_edit = zt_edit.to(V_delta_avg.dtype)
 
+            if step_callback is not None:
+                step_callback(i, t, zt_edit, "flowedit")
+
         else:  # regular sampling for last n_min steps
 
             if i == T_steps - n_min:
@@ -409,6 +415,9 @@ def FlowEditSD3ControlNet(pipe,
             prev_sample = xt_tar + (t_im1 - t_i) * (Vt_tar)
             prev_sample = prev_sample.to(Vt_tar.dtype)
             xt_tar = prev_sample
+
+            if step_callback is not None:
+                step_callback(i, t, xt_tar, "sdedit")
 
     return zt_edit if n_min == 0 else xt_tar
 
