@@ -42,8 +42,10 @@ logger = get_logger(__name__)
 class ConditionFuser(nn.Module):
     """Fuses three VAE-encoded conditions (48-ch) into ControlNet input (16-ch).
 
-    A simple 1x1 convolution. Zero-initialized so ControlNet starts with no
-    conditioning signal and gradually learns to use the fused conditions.
+    Input layout: [pre_img(16ch), pre_seg(16ch), post_seg(16ch)]
+    Initialized so pre_img channels pass through as identity (ControlNet
+    receives pre-image signal from step 0), while segmap channels start
+    at zero and are learned during training.
     """
 
     def __init__(self, in_channels=48, out_channels=16):
@@ -51,6 +53,10 @@ class ConditionFuser(nn.Module):
         self.proj = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=True)
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
+        # Identity init for pre_image channels: output ≈ pre_img_latent at start
+        with torch.no_grad():
+            for i in range(min(out_channels, 16)):
+                self.proj.weight[i, i, 0, 0] = 1.0
 
     def forward(self, pre_img_latent, pre_seg_latent, post_seg_latent):
         cat = torch.cat([pre_img_latent, pre_seg_latent, post_seg_latent], dim=1)

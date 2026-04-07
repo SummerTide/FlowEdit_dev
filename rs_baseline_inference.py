@@ -36,11 +36,15 @@ from rs_data.hiucd import (
 
 
 class ConditionFuser(nn.Module):
-    """Fuses three VAE-encoded conditions (48-ch) into ControlNet input (16-ch)."""
+    """Fuses three VAE-encoded conditions (48-ch) into ControlNet input (16-ch).
+
+    Input layout: [pre_img(16ch), pre_seg(16ch), post_seg(16ch)]
+    """
 
     def __init__(self, in_channels=48, out_channels=16):
         super().__init__()
         self.proj = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=True)
+        # Note: init doesn't matter at inference - weights come from checkpoint
 
     def forward(self, pre_img_latent, pre_seg_latent, post_seg_latent):
         cat = torch.cat([pre_img_latent, pre_seg_latent, post_seg_latent], dim=1)
